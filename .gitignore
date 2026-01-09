@@ -5,3 +5,4 @@ bin
 *.local
 # Ignore auth-client directory
 auth-client
+.env

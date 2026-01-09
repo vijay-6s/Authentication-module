@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Better Auth - Google OAuth Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+        button:hover {
+            background-color: #357ae8;
+        }
+        .info {
+            background-color: #f0f0f0;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+        pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Better Auth - Google OAuth Test</h1>
+    
+    <button onclick="signInWithGoogle()">Sign In with Google</button>
+    <button onclick="checkSession()">Check Session</button>
+    <button onclick="signOut()">Sign Out</button>
+    
+    <div class="info">
+        <h3>Response:</h3>
+        <pre id="response">Click a button to test...</pre>
+    </div>
+
+    <script type="module">
+        // Import Better Auth client from CDN
+        import { createAuthClient } from 'https://esm.sh/better-auth@1.0.0-beta.11/client';
+        
+        // Create auth client
+        const authClient = createAuthClient({
+            baseURL: 'http://localhost:3000'
+        });
+        
+        // Make functions available globally
+        window.signInWithGoogle = async () => {
+            try {
+                document.getElementById('response').textContent = 'Initiating Google Sign In...';
+                
+                const data = await authClient.signIn.social({
+                    provider: "google",
+                    callbackURL: "http://localhost:3000/api/auth/callback/google"
+                });
+                
+                document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById('response').textContent = 'Error: ' + error.message;
+                console.error('Sign in error:', error);
+            }
+        };
+        
+        window.checkSession = async () => {
+            try {
+                document.getElementById('response').textContent = 'Checking session...';
+                
+                const response = await fetch('http://localhost:3000/api/me', {
+                    credentials: 'include'
+                });
+                
+                const session = await response.json();
+                document.getElementById('response').textContent = JSON.stringify(session, null, 2);
+            } catch (error) {
+                document.getElementById('response').textContent = 'Error: ' + error.message;
+                console.error('Session check error:', error);
+            }
+        };
+        
+        window.signOut = async () => {
+            try {
+                document.getElementById('response').textContent = 'Signing out...';
+                
+                await authClient.signOut();
+                
+                document.getElementById('response').textContent = 'Signed out successfully!';
+            } catch (error) {
+                document.getElementById('response').textContent = 'Error: ' + error.message;
+                console.error('Sign out error:', error);
+            }
+        };
+    </script>
+</body>
+</html>

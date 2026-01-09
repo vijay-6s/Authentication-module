@@ -1,0 +1,7 @@
+node_modules
+dist
+bin
+
+*.local
+# Ignore auth-client directory
+auth-client

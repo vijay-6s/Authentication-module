@@ -4,7 +4,7 @@ import { mongodbClient } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import nodemailer from "nodemailer";
-import { jwtVerify, JWTPayload } from "jose";
+import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 
 /* -------------------- Types -------------------- */
 declare global {
@@ -30,7 +30,7 @@ const app = express();
 /* -------------------- CORS -------------------- */
 app.use(
   cors({
-    origin: ["http://localhost:5173","http://localhost:8000"],
+    origin: ["http://localhost:5173"],
     credentials: true,
   })
 );
@@ -41,25 +41,24 @@ app.use(express.urlencoded({ extended: true }));
 /* -------------------- Better Auth -------------------- */
 app.use("/api/auth", toNodeHandler(auth));
 
-/* -------------------- JWT Middleware (Symmetric HS256) -------------------- */
+/* -------------------- JWKS JWT -------------------- */
+const JWKS = createRemoteJWKSet(
+  new URL("http://localhost:3000/api/auth/jwks")
+);
+
 const requireJwt = async (req: any, res: any, next: any) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) return res.status(401).json({ error: "Missing token" });
 
-    // Use symmetric secret (HS256) - same secret can be shared across microservices
-    const { payload } = await jwtVerify(
-      token,
-      new TextEncoder().encode(process.env.JWT_SECRET!),
-      {
-        issuer: "http://localhost:3000",
-        audience: "http://localhost:3000",
-      }
-    );
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: "http://localhost:3000",
+      audience: "http://localhost:3000",
+    });
 
     req.user = payload;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 };

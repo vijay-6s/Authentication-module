@@ -55,6 +55,7 @@ const requireJwt = async (req: any, res: any, next: any) => {
       issuer: "http://localhost:3000",
       audience: "http://localhost:3000",
     });
+    console.log(JWKS.jwks());
 
     req.user = payload;
     next();

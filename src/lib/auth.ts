@@ -1,25 +1,31 @@
+// lib/auth.ts
 import { mongodbClient } from "@/lib/db";
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
-import { jwt, organization, genericOAuth } from "better-auth/plugins";
+import { jwt, organization } from "better-auth/plugins";
 import { ObjectId } from "mongodb";
 import { sendOrganizationInvitation } from "./mailer";
-
+import { genericOAuth } from "better-auth/plugins";
 export const auth = betterAuth({
   database: mongodbAdapter(mongodbClient.getDb()),
   baseURL: "http://localhost:3000",
-  trustedOrigins: ["http://localhost:5173","http://localhost:000"],
+  trustedOrigins: ["http://localhost:5173"],
   secret: process.env.JWT_SECRET!,
-  
+
   advanced: {
     useSecureCookies: false,
-    generateId: undefined,
-    crossSubDomainCookies: {
-      enabled: false
+    defaultCookieAttributes: { sameSite: "lax" },
+  },
+  cookies: {
+    sessionToken: {
+      name: "better-auth.session_token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax", // ✅ required for redirects
+        secure: false,   // true only in HTTPS
+        path: "/",
+      },
     },
-    defaultCookieAttributes: {
-      sameSite: "lax"
-    }
   },
 
   emailAndPassword: { enabled: true },
@@ -33,7 +39,6 @@ export const auth = betterAuth({
       clientId: process.env.MICROSOFT_CLIENT_ID!,
       clientSecret: process.env.MICROSOFT_CLIENT_SECRET!,
       tenantId: "common",
-      redirectURI: "http://localhost:3000/api/auth/callback/microsoft",
     },
   },
 
@@ -45,22 +50,17 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
-        after: async (user, ctx : any) => {
-          console.log("USER CREATE AFTER HOOK HIT");
-
-          await mongodbClient
-            .getDb()
-            .collection("user")
-            .updateOne(
-              { _id: new ObjectId(user.id) },
-              {
-                $set: {
-                  role: "user",
-                  onboardingCompleted: false,
-                  provider: ctx.context?.oauth?.providerId ?? "password",
-                },
-              }
-            );
+        after: async (user : any , ctx: any) => {
+          await mongodbClient.getDb().collection("user").updateOne(
+            { _id: new ObjectId(user.id) },
+            {
+              $set: {
+                role: "user",
+                onboardingCompleted: false,
+                provider: ctx.context?.oauth?.providerId ?? "password",
+              },
+            }
+          );
         },
       },
     },
@@ -68,46 +68,23 @@ export const auth = betterAuth({
 
   plugins: [
     jwt(),
-genericOAuth({
+    genericOAuth({
   config: [
     {
       providerId: "zoho",
       clientId: process.env.ZOHO_CLIENT_ID!,
       clientSecret: process.env.ZOHO_CLIENT_SECRET!,
+      authorizationUrl: "https://accounts.zoho.com/oauth/v2/auth",
+      tokenUrl: "http://localhost:3000/auth/zoho/token",
+      userInfoUrl: "http://localhost:3000/auth/zoho/userinfo",
+       scopes: ["Aaaserver.profile.READ"],
 
-      authorizationUrl: "https://accounts.zoho.in/oauth/v2/auth",
-      tokenUrl: "https://accounts.zoho.in/oauth/v2/token",
-
-      scopes: ["Aaaserver.profile.READ"],
-      userInfoUrl: "https://accounts.zoho.in/oauth/user/info",
-
-      mapProfileToUser: (profile) => {
-        console.log("🔍 ZOHO PROFILE RAW:", profile);
-
-        return {
-          // REQUIRED: unique ID
-          id: String(profile.ZUID ?? profile.id),
-
-          // REQUIRED: email (Zoho uses capital E)
-          email: profile.Email?.toLowerCase(),
-
-          // OPTIONAL: display name
-          name:
-            profile.Display_Name ||
-            `${profile.First_Name ?? ""} ${profile.Last_Name ?? ""}`.trim(),
-
-          // OPTIONAL but recommended
-          emailVerified: true,
-        };
-      },
     },
   ],
 }),
-
     organization({
       async sendInvitationEmail(data) {
         const inviteLink = `http://localhost:5173/accept-invitation/${data.id}`;
-
         await sendOrganizationInvitation({
           email: data.email,
           teamName: data.organization.name,

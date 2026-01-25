@@ -1,10 +1,8 @@
 import express from "express";
 import cors from "cors";
-import { mongodbClient } from "@/lib/db";
+import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 import { auth } from "@/lib/auth";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
-import nodemailer from "nodemailer";
-import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 
 /* -------------------- Types -------------------- */
 declare global {
@@ -14,23 +12,21 @@ declare global {
     }
   }
 }
-const transporter = nodemailer.createTransport({
-    service: "gmail",
-    host: "smtp.gmail.com",
-    auth: {
-        user: "vijaymano0501@gmail.com", // your email
-        pass: "gmgv utjt tupv hmqp" // the app password you generated, paste without spaces
-    },
-    secure: true,
-    port: 465
-});
 
 const app = express();
+
+/* ======================================================================
+   Zoho DC Store (keyed by OAuth state)
+   ====================================================================== */
+const zohoDcStore = new Map<
+  string,
+  { accountsServer: string; location?: string }
+>();
 
 /* -------------------- CORS -------------------- */
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: "http://localhost:5173",
     credentials: true,
   })
 );
@@ -38,10 +34,114 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* -------------------- Better Auth -------------------- */
-app.use("/api/auth", toNodeHandler(auth));
+/* ======================================================================
+   Better Auth (MUST be mounted before custom routes that depend on it)
+   ====================================================================== */
+/* -------------------- Better Auth with Zoho DC interception -------------------- */
+const betterAuthHandler = toNodeHandler(auth);
 
-/* -------------------- JWKS JWT -------------------- */
+app.use("/api/auth", (req, res) => {
+  if (
+    req.method === "GET" &&
+    req.path === "/oauth2/callback/zoho"
+  ) {
+    const {
+      code,
+      location,
+      "accounts-server": accountsServer,
+    } = req.query as Record<string, string>;
+
+    if (code && accountsServer) {
+      zohoDcStore.set(code, { accountsServer, location });
+      console.log(
+        "Stored Zoho DC info BY CODE:",
+        code,
+        accountsServer,
+        location
+      );
+    }
+  }
+
+  betterAuthHandler(req, res);
+});
+
+
+
+/* ====================== ZOHO INTERCEPTOR ROUTES ====================== */
+
+
+app.post("/auth/zoho/token", async (req, res) => {
+  const { code } = req.body;
+
+  const dc = zohoDcStore.get(code);
+  if (!dc) {
+    return res.status(400).json({ error: "Zoho DC not found for code" });
+  }
+
+  const tokenRes = await fetch(
+    `${dc.accountsServer}/oauth/v2/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(req.body),
+    }
+  );
+
+  const tokenJson = await tokenRes.json(); // ✅ parse JSON
+
+  // 🔑 bind DC to access_token
+  zohoDcStore.set(tokenJson.access_token, dc);
+
+  // optional cleanup
+  zohoDcStore.delete(code);
+
+  res.json(tokenJson); // ✅ return JSON
+});
+
+
+
+app.get("/auth/zoho/userinfo", async (req, res) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).json({ error: "Missing Authorization header" });
+  }
+
+  const accessToken = authHeader.replace("Bearer ", "");
+  const dc = zohoDcStore.get(accessToken);
+
+  if (!dc) {
+    return res.status(400).json({ error: "DC not found for access token" });
+  }
+
+  const zohoRes = await fetch(
+    `${dc.accountsServer}/oauth/user/info`,
+    {
+      headers: { Authorization: authHeader },
+    }
+  );
+
+  const profile = await zohoRes.json();
+
+  console.log("🔍 ZOHO PROFILE RAW:", profile);
+
+  res.json({
+    id: String(profile.ZUID ?? profile.id),
+    email: profile.Email?.toLowerCase(),
+    name:
+      profile.Display_Name ||
+      `${profile.First_Name ?? ""} ${profile.Last_Name ?? ""}`.trim(),
+    emailVerified: true,
+    image: null,
+  });
+});
+
+
+
+
+/* ======================================================================
+   JWT utilities
+   ====================================================================== */
 const JWKS = createRemoteJWKSet(
   new URL("http://localhost:3000/api/auth/jwks")
 );
@@ -55,7 +155,6 @@ const requireJwt = async (req: any, res: any, next: any) => {
       issuer: "http://localhost:3000",
       audience: "http://localhost:3000",
     });
-    console.log(JWKS.jwks());
 
     req.user = payload;
     next();
@@ -64,120 +163,10 @@ const requireJwt = async (req: any, res: any, next: any) => {
   }
 };
 
-/* -------------------- Mailer -------------------- */
-async function sendEmail({
-  to,
-  subject,
-  html,
-}: {
-  to: string;
-  subject: string;
-  html: string;
-}) {
-  console.log("📨 EMAIL");
-  console.log("To:", to);
-  console.log("Subject:", subject);
-  console.log(html);
-}
+/* ======================================================================
+   APIs
+   ====================================================================== */
 
-/* -------------------- Create Organization -------------------- */
-app.post("/organization/create", async (req, res) => {
-  console.log(res);
-  try {
-    const { name, email } = req.body;
-    if (!name || !email) {
-      return res.status(400).json({ error: "Name and email required" });
-    }
-
-    // Must be logged in
-    const session = await auth.api.getSession({
-      headers: fromNodeHeaders(req.headers),
-    });
-
-    if (!session?.user) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
- const result = await mongodbClient
-  .getCollection("user")
-  .insertOne({
-    email: email,
-    role: "admin",
-    createdAt: new Date(),
-  })
-
-const userID : string = String(result.insertedId)
-
-console.log("Inserted user id:", userID);
-
-(async () => {
-  await transporter.sendMail({
-  from: "vijaymano0501@gmail.com", // your email
-  to: email, // the email address you want to send an email to
-  subject: `You're invited to ${name}`, // The title or subject of the email
-  html: `
-    <h2>${name}</h2>
-    <p>You were invited to join this organization.</p>
-    <a href="http://localhost:5173">Accept Invitation</a>
-  ` // I like sending my email as html, you can send \
-           // emails as html or as plain text
-});
-
-console.log("Email sent");
-})();
-    const slug =
-      name
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .replace(/[^a-z0-9-]/g, "") +
-      "-" +
-      Date.now().toString().slice(-4);
-
-    // 1️⃣ Create org
-    const org = await auth.api.createOrganization({
-      body: { name, slug },
-      headers: fromNodeHeaders(req.headers),
-    });
-
-    const orgId = org?.id;
-
-const data = await auth.api.addMember({
-    body: {
-        userId: userID,
-        role: ["admin"], // required
-        organizationId: orgId,
-    },
-});
-
-
-    // 3️⃣ Send email
-    await sendEmail({
-      to: email,
-      subject: `You're invited to ${name}`,
-      html: `
-        <h2>${name}</h2>
-        <p>You were invited to join this organization.</p>
-        <a href="http://localhost:5173">Accept Invitation</a>
-      `,
-    });
-
-    res.json({
-      success: true,
-      organizationId: orgId,
-    });
-  } catch (err: any) {
-    console.error(err);
-    res.status(400).json({ error: err.message });
-  }
-});
-
-/* -------------------- Protected API -------------------- */
-app.get("/api/protected", requireJwt, (req, res) => {
-  res.json({
-    user: req.user,
-  });
-});
-
-/* -------------------- Session -------------------- */
 app.get("/api/me", async (req, res) => {
   const session = await auth.api.getSession({
     headers: fromNodeHeaders(req.headers),
@@ -185,9 +174,23 @@ app.get("/api/me", async (req, res) => {
   res.json(session);
 });
 
-/* -------------------- Root -------------------- */
-app.get("/", (_req, res) => {
-  res.json({ status: "OK – Better Auth + Organizations running" });
+app.get("/api/protected", requireJwt, (req, res) => {
+  res.json({ user: req.user });
 });
 
+/* ======================================================================
+   🔑 IMPORTANT: Capture Zoho DC DURING TOKEN EXCHANGE
+   ====================================================================== */
+
+/**
+ * Zoho returns `accounts-server` only during authorization callback,
+ * BUT Better Auth already owns that route.
+ *
+ * So we extract DC lazily from Zoho error responses if needed.
+ * (Zoho validates DC via token endpoint anyway.)
+ */
+
+/* ======================================================================
+   Export
+   ====================================================================== */
 export default app;

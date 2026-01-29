@@ -4,6 +4,15 @@ import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 import { auth } from "@/lib/auth";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 
+import {
+  storeDcByCode,
+  getDcByCode,
+  bindDcToToken,
+  deleteCode,
+  getDcByToken,
+  deleteToken,
+} from "@/lib/zoho-dc.store";
+
 /* -------------------- Types -------------------- */
 declare global {
   namespace Express {
@@ -14,14 +23,6 @@ declare global {
 }
 
 const app = express();
-
-/* ======================================================================
-   Zoho DC Store (keyed by OAuth state)
-   ====================================================================== */
-const zohoDcStore = new Map<
-  string,
-  { accountsServer: string; location?: string }
->();
 
 /* -------------------- CORS -------------------- */
 app.use(
@@ -35,45 +36,62 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ======================================================================
-   Better Auth (MUST be mounted before custom routes that depend on it)
+   Zoho DC Whitelist (SECURITY CRITICAL)
    ====================================================================== */
-/* -------------------- Better Auth with Zoho DC interception -------------------- */
+const ALLOWED_ZOHO_DCS = [
+  "https://accounts.zoho.com",
+  "https://accounts.zoho.in",
+  "https://accounts.zoho.eu",
+  "https://accounts.zoho.com.au",
+  "https://accounts.zoho.jp",
+];
+
+/* ======================================================================
+   Better Auth (MUST be mounted before dependent routes)
+   ====================================================================== */
 const betterAuthHandler = toNodeHandler(auth);
 
-app.use("/api/auth", (req, res) => {
-  if (
-    req.method === "GET" &&
-    req.path === "/oauth2/callback/zoho"
-  ) {
+/**
+ * Intercept Zoho OAuth callback to capture DC
+ */
+app.use("/api/auth", async (req, res) => {
+  if (req.method === "GET" && req.path === "/oauth2/callback/zoho") {
     const {
       code,
       location,
       "accounts-server": accountsServer,
-    } = req.query as Record<string, string>;
+    } = req.query as {
+      code?: string;
+      location?: string;
+      "accounts-server"?: string;
+    };
 
-    if (code && accountsServer) {
-      zohoDcStore.set(code, { accountsServer, location });
-      console.log(
-        "Stored Zoho DC info BY CODE:",
-        code,
+    if (
+      code &&
+      accountsServer &&
+      ALLOWED_ZOHO_DCS.includes(accountsServer)
+    ) {
+      await storeDcByCode(code, {
         accountsServer,
-        location
-      );
+        location,
+      });
     }
   }
 
   betterAuthHandler(req, res);
 });
 
+/* ======================================================================
+   ZOHO INTERCEPTOR ROUTES
+   ====================================================================== */
 
-
-/* ====================== ZOHO INTERCEPTOR ROUTES ====================== */
-
-
+/**
+ * Exchange authorization code → access token
+ */
 app.post("/auth/zoho/token", async (req, res) => {
-  const { code } = req.body;
+  const { code } = req.body as { code: string };
 
-  const dc = zohoDcStore.get(code);
+  const dc = await getDcByCode(code);
   if (!dc) {
     return res.status(400).json({ error: "Zoho DC not found for code" });
   }
@@ -87,28 +105,41 @@ app.post("/auth/zoho/token", async (req, res) => {
     }
   );
 
-  const tokenJson = await tokenRes.json(); // ✅ parse JSON
+  if (!tokenRes.ok) {
+    const err = await tokenRes.text();
+    return res
+      .status(400)
+      .json({ error: "Zoho token exchange failed", err });
+  }
 
-  // 🔑 bind DC to access_token
-  zohoDcStore.set(tokenJson.access_token, dc);
+  const tokenJson: {
+    access_token: string;
+    expires_in: number;
+  } = await tokenRes.json();
 
-  // optional cleanup
-  zohoDcStore.delete(code);
+  await bindDcToToken(
+    tokenJson.access_token,
+    dc,
+    Math.min(tokenJson.expires_in, 3600)
+  );
 
-  res.json(tokenJson); // ✅ return JSON
+  // one-time use
+  await deleteCode(code);
+
+  res.json(tokenJson);
 });
 
-
-
+/**
+ * Fetch Zoho user profile
+ */
 app.get("/auth/zoho/userinfo", async (req, res) => {
   const authHeader = req.headers.authorization;
-
   if (!authHeader) {
     return res.status(401).json({ error: "Missing Authorization header" });
   }
 
   const accessToken = authHeader.replace("Bearer ", "");
-  const dc = zohoDcStore.get(accessToken);
+  const dc = await getDcByToken(accessToken);
 
   if (!dc) {
     return res.status(400).json({ error: "DC not found for access token" });
@@ -121,9 +152,17 @@ app.get("/auth/zoho/userinfo", async (req, res) => {
     }
   );
 
+  if (!zohoRes.ok) {
+    const err = await zohoRes.text();
+    return res
+      .status(400)
+      .json({ error: "Zoho userinfo failed", err });
+  }
+
   const profile = await zohoRes.json();
 
-  console.log("🔍 ZOHO PROFILE RAW:", profile);
+  // 🔥 cleanup BEFORE response
+  await deleteToken(accessToken);
 
   res.json({
     id: String(profile.ZUID ?? profile.id),
@@ -136,11 +175,8 @@ app.get("/auth/zoho/userinfo", async (req, res) => {
   });
 });
 
-
-
-
 /* ======================================================================
-   JWT utilities
+   JWT Utilities
    ====================================================================== */
 const JWKS = createRemoteJWKSet(
   new URL("http://localhost:3000/api/auth/jwks")
@@ -177,18 +213,6 @@ app.get("/api/me", async (req, res) => {
 app.get("/api/protected", requireJwt, (req, res) => {
   res.json({ user: req.user });
 });
-
-/* ======================================================================
-   🔑 IMPORTANT: Capture Zoho DC DURING TOKEN EXCHANGE
-   ====================================================================== */
-
-/**
- * Zoho returns `accounts-server` only during authorization callback,
- * BUT Better Auth already owns that route.
- *
- * So we extract DC lazily from Zoho error responses if needed.
- * (Zoho validates DC via token endpoint anyway.)
- */
 
 /* ======================================================================
    Export

@@ -1,10 +1,10 @@
-// lib/auth.ts
 import { mongodbClient } from "@/lib/db";
+import { magicLink } from "better-auth/plugins";
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { jwt, organization } from "better-auth/plugins";
 import { ObjectId } from "mongodb";
-import { sendOrganizationInvitation } from "./mailer";
+import { sendOrganizationInvitation, sendMagicLinkEmail } from "./mailer";
 import { genericOAuth } from "better-auth/plugins";
 export const auth = betterAuth({
   database: mongodbAdapter(mongodbClient.getDb()),
@@ -21,8 +21,8 @@ export const auth = betterAuth({
       name: "better-auth.session_token",
       options: {
         httpOnly: true,
-        sameSite: "lax", // ✅ required for redirects
-        secure: false,   // true only in HTTPS
+        sameSite: "lax", 
+        secure: false,   
         path: "/",
       },
     },
@@ -55,7 +55,7 @@ export const auth = betterAuth({
             { _id: new ObjectId(user.id) },
             {
               $set: {
-                role: "user",
+                role: "admin",
                 onboardingCompleted: false,
                 provider: ctx.context?.oauth?.providerId ?? "password",
               },
@@ -82,6 +82,11 @@ export const auth = betterAuth({
     },
   ],
 }),
+ magicLink({
+    sendMagicLink: async ({ email, token, url }, ctx) => {
+      await sendMagicLinkEmail({ email, url });
+    }
+  }),
     organization({
       async sendInvitationEmail(data) {
         const inviteLink = `http://localhost:5173/accept-invitation/${data.id}`;
